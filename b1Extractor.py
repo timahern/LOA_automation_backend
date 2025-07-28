@@ -5,13 +5,11 @@ from pypdf import PdfReader, PdfWriter
 import difflib
 
 def extract_b1_from_uploaded_pdf(uploaded_file, keyword="Exhibit B.1: Subcontract Scope of Work"):
-    # External dependency paths
-    poppler_path = r"C:\Users\timah\poppler\poppler-24.08.0\Library\bin"
-    pytesseract.pytesseract.tesseract_cmd = r"C:\Users\timah\tesseract\tesseract.exe"
+    
 
     # Read uploaded file as bytes and convert to images
     file_bytes = uploaded_file.read()
-    pages = convert_from_bytes(file_bytes, dpi=300, poppler_path=poppler_path)
+    pages = convert_from_bytes(file_bytes, dpi=300)
 
     candidate_pages = []
     found_b1 = False
