@@ -9,7 +9,7 @@ def extract_b1_from_uploaded_pdf(uploaded_file, keyword="Exhibit B.1: Subcontrac
 
     # Read uploaded file as bytes and convert to images
     file_bytes = uploaded_file.read()
-    pages = convert_from_bytes(file_bytes, dpi=300)
+    pages = convert_from_bytes(file_bytes, dpi=150)
 
     candidate_pages = []
     found_b1 = False
