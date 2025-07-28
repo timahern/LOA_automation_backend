@@ -36,7 +36,8 @@ def check_api_key():
 
     expected_key = os.getenv("API_KEY")
     actual_key = request.headers.get("x-api-key")
-
+    print(f"Expected: {expected_key} | Got: {actual_key}")
+    
     if actual_key != expected_key:
         return jsonify({"error": "Unauthorized"}), 401
 
