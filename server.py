@@ -1,6 +1,6 @@
 from flask import Flask, request, send_file, jsonify
 from loaListGenerator import LoaGenerator  
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin
 from dotenv import load_dotenv
 import os
 from io import BytesIO
@@ -13,16 +13,18 @@ load_dotenv()
 
 app = Flask(__name__)
 
+print(f"Loaded FRONTEND_URL: {os.getenv('FRONTEND_URL')}")
+
 limiter = Limiter(key_func=get_remote_address)
 limiter.init_app(app)
 
 frontend_url = os.getenv("FRONTEND_URL")
 CORS(app,
-     origins=[os.getenv("FRONTEND_URL")],
+     resources={r"/*": {"origins": frontend_url}},
      supports_credentials=False,
      expose_headers=["Content-Disposition"],
-     methods=["POST", "OPTIONS"],
-     allow_headers=["Content-Type", "x-api-key"])
+     methods=["GET", "POST", "OPTIONS"],
+     allow_headers=["Content-Type", "Authorization"])
 #CORS(app)
 
 @app.errorhandler(RateLimitExceeded)
@@ -32,7 +34,7 @@ def ratelimit_handler(e):
 @app.before_request
 def check_api_key():
     if request.method == "OPTIONS":
-        return None  # Let Flask-CORS handle it
+        return
 
     expected_key = os.getenv("API_KEY")
     actual_key = request.headers.get("x-api-key")
@@ -41,7 +43,25 @@ def check_api_key():
     if actual_key != expected_key:
         return jsonify({"error": "Unauthorized"}), 401
 
-@app.route('/generate-loas', methods=['POST'])
+
+@app.route("/test-env")
+def test_env():
+    theKey = os.getenv("API_KEY", "Not Found")
+    return f"API_KEY is: {theKey}"
+
+@app.route("/test-cors", methods=["OPTIONS", "POST"])
+def test_cors():
+    if request.method == "OPTIONS":
+        response = make_response()
+        response.headers["Access-Control-Allow-Origin"] = "https://d1ti7vs3ibhxlw.cloudfront.net"
+        response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        return response
+    return jsonify({"message": "POST received"})
+
+
+@app.route('/generate-loas', methods=['POST', 'OPTIONS'])
+@cross_origin(origin=frontend_url)
 @limiter.limit("5 per minute") 
 def generate_loas():
     files = request.files
@@ -70,9 +90,14 @@ def generate_loas():
 
 from buyoutBatchToB1 import extract_b1_batch_from_uploads  # ← your batch function
 
-@app.route('/extract-b1s', methods=['POST'])
+@app.route('/extract-b1s', methods=['POST', 'OPTIONS'])
+@cross_origin(origin=frontend_url)
 @limiter.limit("5 per minute")
 def extract_b1s():
+
+    if request.method == "OPTIONS":
+        return '', 200
+
     try:
         uploaded_files = request.files.getlist('buyout_files')  # Expect 'buyout_files' key
         b1_pdfs = extract_b1_batch_from_uploads(uploaded_files)

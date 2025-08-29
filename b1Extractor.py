@@ -4,12 +4,14 @@ import pytesseract
 from pypdf import PdfReader, PdfWriter
 import difflib
 
+pytesseract.pytesseract.tesseract_cmd = r"/usr/bin/tesseract"
+
 def extract_b1_from_uploaded_pdf(uploaded_file, keyword="Exhibit B.1: Subcontract Scope of Work"):
     
 
     # Read uploaded file as bytes and convert to images
     file_bytes = uploaded_file.read()
-    pages = convert_from_bytes(file_bytes, dpi=150)
+    pages = convert_from_bytes(file_bytes, dpi=150, poppler_path="/usr/bin")
 
     candidate_pages = []
     found_b1 = False
