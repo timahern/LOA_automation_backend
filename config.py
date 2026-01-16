@@ -4,7 +4,7 @@ PROCORE_CLIENT_ID = os.getenv("PROCORE_CLIENT_ID", "")
 PROCORE_CLIENT_SECRET = os.getenv("PROCORE_CLIENT_SECRET", "")
 
 # Choose ONE for now. Start with localhost.
-BASE_URL = "https://apmtools.art"
+BASE_URL = "https://apmtoolsbackend.art"
 
 REDIRECT_URI = f"{BASE_URL}/auth/callback"
 
