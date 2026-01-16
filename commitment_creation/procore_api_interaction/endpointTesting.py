@@ -35,8 +35,9 @@ def makeRequest(sub_info):
     data = load_tokens()
 
     #vendor is determined through getSubNameMatch function. 
+    print(f"subname is {sub_info['vendor_selected']}")
     vendor_obj = getSubNameMatch(company_id, project_id, sub_info["vendor_selected"])
-    
+    print(f"MATCHED subName is {vendor_obj})
     if(vendor_obj):
         vendor_id = vendor_obj['id']
         bill_recipients_and_accessors = getVendorUsers(company_id, project_id, vendor_id)
