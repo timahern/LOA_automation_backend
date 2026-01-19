@@ -35,7 +35,7 @@ def getContractTitle(company_id, proj_id, incriment):
     cleaned = response_data["project_number"].replace("-", "")
     if incriment <10:
         incriment = f"0{incriment}"
-    ans = f"SC{cleaned}-{incriment}"
+    ans = f"SC{cleaned} {incriment}"
     return ans
 
 
