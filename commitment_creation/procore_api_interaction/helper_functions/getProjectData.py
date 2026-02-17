@@ -315,7 +315,7 @@ def createWbsCode(company_id, project_id, cost_code):
         return
     
     line_item_type_segment_id = getWbsSegment(company_id, project_id, "line_item_type")
-    line_item_segment_id = getMatchingCommitmentSegmentItemId("4264340", "116704", line_item_type_segment_id)
+    line_item_segment_id = getMatchingCommitmentSegmentItemId(company_id, project_id, line_item_type_segment_id)
 
 
     url = f"https://api.procore.com/rest/v1.0/projects/{project_id}/work_breakdown_structure/wbs_codes"
