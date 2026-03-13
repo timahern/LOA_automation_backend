@@ -6,6 +6,41 @@ from auth.getTokens import refresh_and_store_tokens
 from auth.tokenStore import load_tokens
 
 
+def getProjectNumber(company_id, project_id):
+    data = load_tokens()
+
+    url = f"https://api.procore.com/rest/v1.0/projects/{project_id}"
+
+    params = {
+        "company_id": company_id
+    }
+
+    response = requests.get(url, headers={
+        'Authorization': f'Bearer {data["access_token"]}',
+        "Procore-Company-Id": company_id, 
+        "Accept": "application/json"
+    }, params = params)
+
+    print("Status:", response.status_code)
+    if(response.status_code == 401):
+        print("need to refresh access token. will try again")
+        data = refresh_and_store_tokens()
+        response = requests.get(url, headers={
+            'Authorization': f'Bearer {data["access_token"]}',
+            "Procore-Company-Id": company_id, 
+            "Accept": "application/json"
+        }, params = params)
+        print("Status:", response.status_code)
+    
+    if(response.status_code != 200):
+        return None
+    
+    response_json = response.json()
+
+    return response_json.get('project_number')
+
+
+
 def getProjects(company_id):
     data = load_tokens()
     if not data or "access_token" not in data:
@@ -39,7 +74,8 @@ def getProjects(company_id):
     projects = response.json()
     proj_list = []
     for proj in projects:
-        proj_list.append({'project_id':proj['id'], 'project_name': proj['name']})
+        proj_num = getProjectNumber(company_id, proj.get('id')) or ''
+        proj_list.append({'project_id':proj['id'], 'project_name': proj['name'], 'project_number': proj_num})
     return proj_list
 
 
@@ -76,7 +112,5 @@ def getCompaniesAndProjects():
 
 
     return company_list
-    
-
     
     
