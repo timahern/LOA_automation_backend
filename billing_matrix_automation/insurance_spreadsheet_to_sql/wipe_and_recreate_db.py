@@ -3,13 +3,13 @@ from pathlib import Path
 import sqlite3
 import os
 from datetime import date, datetime
- 
+
 # ── Configuration ──────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
 CSV_PATH = BASE_DIR / "Project_Insurance.csv"
 DB_PATH = BASE_DIR / "vendor_insurance.db"
 # ──────────────────────────────────────────────────────────────────────────────
- 
+
 INSURANCE_TYPE_MAP = {
     "Umbrella/Excess":          "umbrella_insurance",
     "General Liability":        "general_liability_insurance",
@@ -17,24 +17,24 @@ INSURANCE_TYPE_MAP = {
     "Workers Compensation":     "workers_comp_insurance",
     "Pollution/Environmental":  "pollution_insurance",
 }
- 
- 
+
+
 def parse_csv(filepath):
     records = {}
- 
+
     with open(filepath, newline='', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            project_number   = row["Project > Number"].strip()
-            project_name     = row["Project > Name"].strip()
-            proj_end_date    = row["Project > Projected Finish Date"].strip()
-            apm              = row["Project > APM"].strip()
-            vendor_name      = row["Company (Vendor) > Name"].strip()
-            exp_date         = row["Company Project Insurance > Expiration Date"].strip()
-            ins_type         = row["Company Project Insurance > Insurance Type"].strip()
- 
+            project_number = row["Project > Number"].strip()
+            project_name   = row["Project > Name"].strip()
+            proj_end_date  = row["Project > Projected Finish Date"].strip()
+            apm            = row["Project > APM"].strip()
+            vendor_name    = row["Company (Vendor) > Name"].strip()
+            exp_date       = row["Company Project Insurance > Expiration Date"].strip()
+            ins_type       = row["Company Project Insurance > Insurance Type"].strip()
+
             key = (project_number, vendor_name)
- 
+
             if key not in records:
                 records[key] = {
                     "project_number":              project_number,
@@ -49,7 +49,7 @@ def parse_csv(filepath):
                     "pollution_insurance":         None,
                     "updated":                     date.today().isoformat(),
                 }
- 
+
             col = INSURANCE_TYPE_MAP.get(ins_type)
             if col and exp_date:
                 existing = records[key][col]
@@ -64,15 +64,17 @@ def parse_csv(filepath):
                 except ValueError:
                     if existing is None:
                         records[key][col] = exp_date
- 
+
     return list(records.values())
- 
- 
-def init_db(db_path):
+
+
+def wipe_and_init_db(db_path):
+    """Drops the table entirely and recreates it fresh."""
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE IF EXISTS vendor_insurance")
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS vendor_insurance (
+        CREATE TABLE vendor_insurance (
             id                          INTEGER PRIMARY KEY AUTOINCREMENT,
             project_number              TEXT,
             project_name                TEXT,
@@ -90,99 +92,45 @@ def init_db(db_path):
     """)
     conn.commit()
     conn.close()
- 
- 
-def migrate_db(db_path):
-    """
-    Adds new columns to an existing DB if they aren't there yet.
-    Safe to run on a fresh DB too — ALTER TABLE is skipped if column exists.
-    """
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(vendor_insurance)")}
- 
-    new_cols = {
-        "project_name":     "TEXT",
-        "proj_end_date":    "TEXT",
-        "pollution_insurance": "TEXT",
-    }
-    for col, col_type in new_cols.items():
-        if col not in existing_cols:
-            cur.execute(f"ALTER TABLE vendor_insurance ADD COLUMN {col} {col_type}")
-            print(f"  Migrated: added column '{col}'")
- 
-    conn.commit()
-    conn.close()
- 
- 
-def upsert_db(records, db_path):
+
+
+def populate_db(records, db_path):
     conn = sqlite3.connect(db_path)
     cur  = conn.cursor()
- 
-    inserted = 0
-    updated  = 0
- 
+
     for rec in records:
-        existing = cur.execute("""
-            SELECT id FROM vendor_insurance
-            WHERE project_number = ? AND vendor_name = ?
-        """, (rec["project_number"], rec["vendor_name"])).fetchone()
- 
-        if existing:
-            cur.execute("""
-                UPDATE vendor_insurance SET
-                    project_name                = :project_name,
-                    proj_end_date               = :proj_end_date,
-                    APM                         = :APM,
-                    umbrella_insurance          = :umbrella_insurance,
-                    general_liability_insurance = :general_liability_insurance,
-                    automobile_insurance        = :automobile_insurance,
-                    workers_comp_insurance      = :workers_comp_insurance,
-                    pollution_insurance         = :pollution_insurance,
-                    updated                     = :updated
-                WHERE project_number = :project_number
-                  AND vendor_name    = :vendor_name
-            """, rec)
-            updated += 1
-        else:
-            cur.execute("""
-                INSERT INTO vendor_insurance (
-                    project_number, project_name, proj_end_date, APM, vendor_name,
-                    umbrella_insurance, general_liability_insurance,
-                    automobile_insurance, workers_comp_insurance,
-                    pollution_insurance, updated
-                ) VALUES (
-                    :project_number, :project_name, :proj_end_date, :APM, :vendor_name,
-                    :umbrella_insurance, :general_liability_insurance,
-                    :automobile_insurance, :workers_comp_insurance,
-                    :pollution_insurance, :updated
-                )
-            """, rec)
-            inserted += 1
- 
+        cur.execute("""
+            INSERT INTO vendor_insurance (
+                project_number, project_name, proj_end_date, APM, vendor_name,
+                umbrella_insurance, general_liability_insurance,
+                automobile_insurance, workers_comp_insurance,
+                pollution_insurance, updated
+            ) VALUES (
+                :project_number, :project_name, :proj_end_date, :APM, :vendor_name,
+                :umbrella_insurance, :general_liability_insurance,
+                :automobile_insurance, :workers_comp_insurance,
+                :pollution_insurance, :updated
+            )
+        """, rec)
+
     conn.commit()
     total = cur.execute("SELECT COUNT(*) FROM vendor_insurance").fetchone()[0]
     conn.close()
-    return total, inserted, updated
- 
- 
+    return total
+
+
 if __name__ == "__main__":
-    print(f"[{date.today()}] Starting insurance DB update...")
- 
+    print(f"[{date.today()}] Starting full insurance DB rebuild...")
+
     print(f"  Parsing CSV: {CSV_PATH}")
     records = parse_csv(CSV_PATH)
     print(f"  Unique (project, vendor) combinations found: {len(records)}")
- 
-    print(f"  Initializing database: {DB_PATH}")
-    init_db(db_path=DB_PATH)
- 
-    print(f"  Running migrations...")
-    migrate_db(db_path=DB_PATH)
- 
-    print(f"  Upserting records...")
-    total, inserted, updated = upsert_db(records, DB_PATH)
-    print(f"  New rows inserted:     {inserted}")
-    print(f"  Existing rows updated: {updated}")
-    print(f"  Total rows in DB:      {total}")
- 
+
+    print(f"  Wiping and recreating database: {DB_PATH}")
+    wipe_and_init_db(DB_PATH)
+
+    print(f"  Populating database...")
+    total = populate_db(records, DB_PATH)
+    print(f"  Total rows inserted: {total}")
+
     print("Done.")
