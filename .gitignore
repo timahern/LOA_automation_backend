@@ -15,7 +15,6 @@ env/
 .DS_Store
 
 # Sensitive data
-billing_matrix_automation/insurance_spreadsheet_to_sql/Project_Insurance.csv
 commitment_creation/gpt_api_interaction/exhibit pages/
 exhibit_b_page1_debug.png
 
