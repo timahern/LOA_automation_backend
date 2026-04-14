@@ -1,6 +1,6 @@
 import os
 
-from flask import Blueprint, request, jsonify, send_file, session, redirect
+from flask import Blueprint, request, jsonify, send_file, session
 from flask_cors import cross_origin
 
 rag_bp = Blueprint("rag", __name__, url_prefix="/rag")
@@ -82,7 +82,7 @@ def page_image(source, page):
         url = s3_helper.get_page_image_url(source, page)
         if not url:
             return jsonify({"error": "Page image not found"}), 404
-        return redirect(url)
+        return jsonify({"url": url})
 
     # Local dev fallback: serve from filesystem
     base_dir   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -92,3 +92,4 @@ def page_image(source, page):
         return jsonify({"error": "Page image not found"}), 404
 
     return send_file(image_path, mimetype="image/png")
+
