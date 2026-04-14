@@ -1,6 +1,7 @@
 import os
 
 from flask import Blueprint, request, jsonify, send_file, session, redirect
+from flask_cors import cross_origin
 
 rag_bp = Blueprint("rag", __name__, url_prefix="/rag")
 
@@ -13,7 +14,12 @@ def _require_rag_auth():
     return None
 
 
-@rag_bp.route("/unlock", methods=["POST"])
+def _origin():
+    return os.getenv("FRONTEND_URL", "").strip()
+
+
+@rag_bp.route("/unlock", methods=["POST", "OPTIONS"])
+@cross_origin(origin=_origin, supports_credentials=True)
 def unlock():
     data = request.get_json(silent=True)
     if not data or "passcode" not in data:
@@ -30,12 +36,14 @@ def unlock():
     return jsonify({"success": True})
 
 
-@rag_bp.route("/check-auth", methods=["GET"])
+@rag_bp.route("/check-auth", methods=["GET", "OPTIONS"])
+@cross_origin(origin=_origin, supports_credentials=True)
 def check_auth():
     return jsonify({"authenticated": bool(session.get(SESSION_KEY))})
 
 
-@rag_bp.route("/chat", methods=["POST"])
+@rag_bp.route("/chat", methods=["POST", "OPTIONS"])
+@cross_origin(origin=_origin, supports_credentials=True)
 def chat():
     err = _require_rag_auth()
     if err:
@@ -60,7 +68,8 @@ def chat():
         return jsonify({"error": str(e)}), 500
 
 
-@rag_bp.route("/page-image/<source>/<int:page>", methods=["GET"])
+@rag_bp.route("/page-image/<source>/<int:page>", methods=["GET", "OPTIONS"])
+@cross_origin(origin=_origin, supports_credentials=True)
 def page_image(source, page):
     err = _require_rag_auth()
     if err:
@@ -72,7 +81,6 @@ def page_image(source, page):
     from rag import s3_helper
 
     if s3_helper.is_configured():
-        # Production: redirect to a pre-signed S3 URL (expires in 1 hour)
         url = s3_helper.get_page_image_url(source, page)
         if not url:
             return jsonify({"error": "Page image not found"}), 404
