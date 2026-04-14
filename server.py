@@ -14,6 +14,7 @@ from routes.loa import loa_bp
 from routes.auth import auth_bp
 from routes.procore import procore_bp
 from routes.billing import billing_bp
+from routes.rag import rag_bp
 
 
 PROCORE_CLIENT_ID = os.getenv("PROCORE_CLIENT_ID")
@@ -54,6 +55,7 @@ app.register_blueprint(loa_bp)
 app.register_blueprint(auth_bp)
 app.register_blueprint(procore_bp)
 app.register_blueprint(billing_bp)
+app.register_blueprint(rag_bp)
 
 
 @app.errorhandler(RateLimitExceeded)

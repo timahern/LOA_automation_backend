@@ -44,3 +44,7 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+
+# RAG generated data — never commit these
+rag/chroma_db/
+docs/
