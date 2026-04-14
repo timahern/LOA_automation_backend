@@ -7,6 +7,8 @@ rag_bp = Blueprint("rag", __name__, url_prefix="/rag")
 
 SESSION_KEY = "rag_authed"
 
+ORIGIN = os.getenv("FRONTEND_URL", "").strip()
+
 
 def _require_rag_auth():
     if not session.get(SESSION_KEY):
@@ -14,12 +16,8 @@ def _require_rag_auth():
     return None
 
 
-def _origin():
-    return os.getenv("FRONTEND_URL", "").strip()
-
-
 @rag_bp.route("/unlock", methods=["POST", "OPTIONS"])
-@cross_origin(origin=_origin, supports_credentials=True)
+@cross_origin(origin=ORIGIN, supports_credentials=True)
 def unlock():
     data = request.get_json(silent=True)
     if not data or "passcode" not in data:
@@ -37,13 +35,13 @@ def unlock():
 
 
 @rag_bp.route("/check-auth", methods=["GET", "OPTIONS"])
-@cross_origin(origin=_origin, supports_credentials=True)
+@cross_origin(origin=ORIGIN, supports_credentials=True)
 def check_auth():
     return jsonify({"authenticated": bool(session.get(SESSION_KEY))})
 
 
 @rag_bp.route("/chat", methods=["POST", "OPTIONS"])
-@cross_origin(origin=_origin, supports_credentials=True)
+@cross_origin(origin=ORIGIN, supports_credentials=True)
 def chat():
     err = _require_rag_auth()
     if err:
@@ -69,7 +67,7 @@ def chat():
 
 
 @rag_bp.route("/page-image/<source>/<int:page>", methods=["GET", "OPTIONS"])
-@cross_origin(origin=_origin, supports_credentials=True)
+@cross_origin(origin=ORIGIN, supports_credentials=True)
 def page_image(source, page):
     err = _require_rag_auth()
     if err:
