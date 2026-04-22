@@ -1,19 +1,40 @@
 import os
 
-from flask import Blueprint, request, jsonify, send_file, session
+from flask import Blueprint, request, jsonify, send_file, session, current_app
 from flask_cors import cross_origin
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 rag_bp = Blueprint("rag", __name__, url_prefix="/rag")
 
 SESSION_KEY = "rag_authed"
+_TOKEN_SALT = "rag-auth-token"
+_TOKEN_MAX_AGE = 3600  # 1 hour
 
 ORIGIN = os.getenv("FRONTEND_URL", "").strip()
 
 
+def _make_token():
+    s = URLSafeTimedSerializer(current_app.secret_key)
+    return s.dumps("authed", salt=_TOKEN_SALT)
+
+
+def _verify_token(token):
+    s = URLSafeTimedSerializer(current_app.secret_key)
+    try:
+        s.loads(token, salt=_TOKEN_SALT, max_age=_TOKEN_MAX_AGE)
+        return True
+    except (BadSignature, SignatureExpired):
+        return False
+
+
 def _require_rag_auth():
-    if not session.get(SESSION_KEY):
-        return jsonify({"error": "Unauthorized — passcode required"}), 401
-    return None
+    # Accept either the session cookie (desktop) or x-rag-token header (mobile/cross-site)
+    if session.get(SESSION_KEY):
+        return None
+    token = request.headers.get("x-rag-token", "")
+    if token and _verify_token(token):
+        return None
+    return jsonify({"error": "Unauthorized — passcode required"}), 401
 
 
 @rag_bp.route("/unlock", methods=["POST", "OPTIONS"])
@@ -31,13 +52,17 @@ def unlock():
         return jsonify({"error": "Incorrect passcode"}), 403
 
     session[SESSION_KEY] = True
-    return jsonify({"success": True})
+    return jsonify({"success": True, "token": _make_token()})
 
 
 @rag_bp.route("/check-auth", methods=["GET", "OPTIONS"])
 @cross_origin(origin=ORIGIN, supports_credentials=True)
 def check_auth():
-    return jsonify({"authenticated": bool(session.get(SESSION_KEY))})
+    authed = bool(session.get(SESSION_KEY))
+    if not authed:
+        token = request.headers.get("x-rag-token", "")
+        authed = bool(token and _verify_token(token))
+    return jsonify({"authenticated": authed})
 
 
 @rag_bp.route("/chat", methods=["POST", "OPTIONS"])

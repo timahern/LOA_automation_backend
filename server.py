@@ -48,7 +48,7 @@ CORS(
     supports_credentials=True,
     expose_headers=["Content-Disposition"],
     methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "x-api-key"],
+    allow_headers=["Content-Type", "Authorization", "x-api-key", "x-rag-token"],
 )
 
 app.register_blueprint(loa_bp)
