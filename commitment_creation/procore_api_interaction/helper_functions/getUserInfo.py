@@ -72,10 +72,14 @@ def getProjects(company_id):
     
 
     projects = response.json()
+    active_projects = [p for p in projects if p.get('status_name') == 'Active']
+
     proj_list = []
-    for proj in projects:
+    for proj in active_projects:
         proj_num = getProjectNumber(company_id, proj.get('id')) or ''
-        proj_list.append({'project_id':proj['id'], 'project_name': proj['name'], 'project_number': proj_num})
+        proj_list.append({'project_id': proj['id'], 'project_name': proj['name'], 'project_number': proj_num})
+
+    proj_list.sort(key=lambda p: (p['project_number'] == '', p['project_number']))
     return proj_list
 
 
@@ -100,11 +104,14 @@ def getCompaniesAndProjects():
     if(response.status_code != 200):
         return
     
+    OUR_COMPANY_ID = 71927
+
     company_list = []
     companies = response.json()
     for company in companies:
-        company_list.append({'id':company['id'], 'company_name': company['name'], 'projects': []})
-
+        if int(company['id']) != OUR_COMPANY_ID:
+            continue
+        company_list.append({'id': company['id'], 'company_name': company['name'], 'projects': []})
 
     for company in company_list:
         company['projects'] = getProjects(str(company['id']))
