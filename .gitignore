@@ -48,3 +48,4 @@ dist/
 # RAG generated data — never commit these
 rag/chroma_db/
 docs/
+sub_chaser/phase0_test_snippet.js

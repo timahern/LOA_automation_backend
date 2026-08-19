@@ -15,6 +15,7 @@ from routes.auth import auth_bp
 from routes.procore import procore_bp
 from routes.billing import billing_bp
 from routes.rag import rag_bp
+from routes.sub_chaser import sub_chaser_bp
 
 
 PROCORE_CLIENT_ID = os.getenv("PROCORE_CLIENT_ID")
@@ -56,6 +57,7 @@ app.register_blueprint(auth_bp)
 app.register_blueprint(procore_bp)
 app.register_blueprint(billing_bp)
 app.register_blueprint(rag_bp)
+app.register_blueprint(sub_chaser_bp)
 
 
 @app.errorhandler(RateLimitExceeded)
@@ -71,6 +73,9 @@ def check_api_key():
         request.path.startswith("/auth")
         or request.path.startswith("/oauth")
         or request.path == "/favicon.ico"
+        #the browser fetches this directly for drag-to-attach / download, where it
+        #can't set an x-api-key header. the random job_id in the path is the key.
+        or (request.path.startswith("/sub-chaser/jobs/") and request.path.endswith("/pdf"))
     ):
         return
 
