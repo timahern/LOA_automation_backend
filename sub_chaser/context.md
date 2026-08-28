@@ -50,6 +50,14 @@ session); the poll route writes rotated tokens back into the session.
   period filter (also supports `filters[commitment_id]`)
 - Requisition rows carry `vendor_name`, `billing_date`, `status`, `attachments[]`,
   `total_claimed_amount` and a commitment linkage (`commitment_id`/`contract`)
+- **Adding an attachment does NOT bump the requisition's `updated_at`** (proven
+  Aug 26, 2026 on project 3254966 / period 4011840 / req 17146589 via
+  `POST /sub-chaser/phase0/timestamps`). Nothing on the requisition moves at all,
+  and attachments carry no date fields of their own. The ONLY signal that a sub
+  submitted paperwork is the **attachment id list + count** — which is why
+  `freshness.py` fingerprints those rather than a last-modified date. Do not
+  "simplify" that back to a timestamp comparison; it silently never fires.
+  Adding and removing were both tested; neither touches the requisition.
 - PDF compile: `POST /rest/v1.0/requisitions/{id}/single_pdf_compilers?polling=true&project_id=`
   body `{"files":[{"type":"cover_sheet","id":""},{"type":"prostore_file","id":...,"url":...}]}`
   → poll `job_url` → `result.url` is a signed storage URL (no auth header)
@@ -73,7 +81,8 @@ session); the poll route writes rotated tokens back into the session.
   Blank PDFs go in `public/forms/` (see the README there).
 - **Phase 2 (BUILT, needs desk verification):** real fetch + concurrent vision.
   Needs `ANTHROPIC_API_KEY` in `.env`. Optional overrides:
-  `SUB_CHASER_VISION_MODEL` (default `claude-opus-5`),
+  `SUB_CHASER_VISION_MODEL` (default `claude-sonnet-5` — chosen deliberately;
+  it returns 0.90–0.95 confidence on these invoices at a fraction of Opus's cost),
   `SUB_CHASER_VISION_EFFORT` (default `medium`).
   Invoices with zero attachments skip the compile and the AI call entirely —
   nothing submitted is a verdict on its own.
@@ -88,6 +97,50 @@ session); the poll route writes rotated tokens back into the session.
   All contacts go in `To` (v1 per brief); the billing/AP title filter exists as
   `BILLING_TITLE_PATTERN` + `APPLY_BILLING_FILTER = False` — flip to enable.
   Verify with `POST /sub-chaser/recipients/diagnostics`.
+- **Phase 4 — verdict cache (DONE, verified live Aug 28, 2026):** `freshness.py`
+  fingerprints an invoice's state, `verdict_cache.py` stores confident verdicts
+  in a sqlite file keyed by that fingerprint + `PROMPT_VERSION`, and
+  `jobs._analyzeOne` serves a hit by skipping BOTH the PDF compile and the
+  vision call. Escape hatches: `{"force": true}` on `/sub-chaser/analyze` re-reads everything
+  (still stores the fresh verdict, so it repairs the cache rather than bypassing
+  it), and `POST /sub-chaser/cache/diagnostics` reports/clears — scoped by
+  `company_id` + `project_id`, and a bare `{"clear": true}` is refused without
+  `confirm_all` because wiping every project is a real cost event.
+  Every cache decision prints `cache HIT / MISS / FORCED` per invoice, and rows
+  carry `from_cache` all the way out through the poll JSON (no frontend reads it
+  yet — check DevTools).
+  ⚠️ **The model is stored but is NOT part of the cache key** (diagnostic only).
+  Changing `SUB_CHASER_VISION_MODEL` therefore invalidates nothing — you'd keep
+  serving the old model's verdicts forever. Clear the cache when you switch
+  models, the same way you would bump `PROMPT_VERSION` when editing the prompt.
+
+### PROVEN live Aug 28, 2026 — Tatte 3254966 / period 4011840
+Four runs back to back, same period, against real Procore data:
+1. **Cold:** 4 × `MISS`, ~17s. Only 4 of the 6 invoices reach the cache at all —
+   the other 2 have zero attachments and short-circuit to `no/no` before it.
+2. **Untouched re-run:** 4 × `HIT`, **~3s**. No compiles, no vision calls.
+   The whole point of the cache, confirmed end to end.
+3. **Attachment added to req 17146817, then removed:** that row missed and
+   re-analyzed on BOTH edits; the other three stayed cached across all four runs
+   with zero false invalidations. Add and remove both invalidate correctly on
+   live data, matching what the phase0 probe predicted.
+
+Note on the remove case: reverting an invoice to a state we already judged still
+costs a re-read, because the table keeps ONE row per invoice (fingerprint is a
+column, not part of the PK) and the add overwrote the pre-add fingerprint. That's
+the safe direction to err in and paperwork doesn't un-submit itself — but it's
+why you see a miss rather than a hit when a file is pulled back off.
+
+**Still unverified:** an `uncertain` row re-analyzing every run instead of
+sticking (`isCacheable`). Nothing came back uncertain on this period, so there
+was nothing to test it with. Also still untested: a file REPLACED in place
+keeping its prostore_file id — the residual gap named in `freshness.py`.
+
+⚠️ On EC2 the sqlite file lands in `sub_chaser/` next to the code (gitignored, so
+a pull won't clobber it), but the service user must have WRITE permission on that
+directory. `putVerdict` swallows its own errors by design, so a read-only dir
+gives you a cache that never hits and never says why — check
+`/sub-chaser/cache/diagnostics` after the first prod run.
 
 ## Attachments — the sub's own paperwork, not blank forms
 The chase email attaches the invoice package the sub ACTUALLY submitted (pulled
@@ -169,7 +222,7 @@ Already present, no action: `requests`, `flask`, `flask_cors`, `dotenv`, `fitz`
 **New .env entries:**
 ```
 ANTHROPIC_API_KEY=sk-ant-...        # REQUIRED
-SUB_CHASER_VISION_MODEL=claude-opus-5    # optional, this is the default
+SUB_CHASER_VISION_MODEL=claude-sonnet-5  # optional, this is the default
 SUB_CHASER_VISION_EFFORT=medium          # optional, this is the default
 ```
 ⚠️ `ANTHROPIC_API_KEY` is read implicitly by the Anthropic SDK — it never appears
@@ -187,5 +240,5 @@ alternative — a `/sub-chaser/jobs/*` behavior on distribution `EFM82AQNI5RIQ` 
 **Restart the Flask service after pulling** — new blueprint, so a reload is required.
 
 ## Out of scope (per brief)
-SharePoint sync, storing PDFs, persistent verdict DB, automated sending,
+SharePoint sync, storing PDFs, automated sending,
 billing/AP-contact title filter (structure only), production hardening.

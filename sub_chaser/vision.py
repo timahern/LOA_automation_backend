@@ -37,7 +37,7 @@ In notes, state which page numbers the completed AIA and the lien waiver were fo
 Respond ONLY with JSON, no other text:
 {"aia_signed_and_notarized":"yes|no|uncertain","lien_waiver_signed":"yes|no|uncertain","confidence":0.0,"notes":"found completed AIA on pp. X-Y, lien waiver on p. Z"}"""
 
-MODEL = os.getenv("SUB_CHASER_VISION_MODEL", "claude-opus-5")
+MODEL = os.getenv("SUB_CHASER_VISION_MODEL", "claude-sonnet-5")
 
 #thinking depth vs speed/cost. this is a well-scoped classification with a proven
 #prompt, so medium is a good default — raise to "high" if verdicts look sloppy.

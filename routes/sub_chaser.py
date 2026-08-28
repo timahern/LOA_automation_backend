@@ -1,7 +1,9 @@
 from flask import Blueprint, request, jsonify, send_file
 from flask_cors import cross_origin
 import io
+import json
 import os
+import tempfile
 
 from billing_matrix_automation.subcontractor_info_retrieval import getBillingPeriods, getWorkOrderContracts
 from sub_chaser.procore_fetch import (
@@ -11,7 +13,12 @@ from sub_chaser.procore_fetch import (
 from sub_chaser.recipients import (
     getProjectDirectory, buildDirectoryIndex, resolveRecipients,
 )
+from sub_chaser.attachments import (
+    getRequisition, listAttachments, canAttach, testAttachmentBehavior,
+)
 from sub_chaser.pdf_compile import compileInvoicePdf
+from sub_chaser.freshness import snapshot, diffSnapshots, STAMP_KEYS, PROMPT_VERSION
+from sub_chaser import verdict_cache
 from sub_chaser.jobs import (
     start_mock_job, start_real_job, get_job_status, get_job_tokens, get_invoice_pdf,
 )
@@ -46,7 +53,11 @@ def start_analysis():
         #request — the worker threads can't reach the flask session
         tokens = worker_tokens.fromSession()
 
-        job_id = start_real_job(company_id, project_id, period_id, tokens)
+        #{"force": true} re-reads every invoice even where a cached verdict
+        #exists. Costs a vision call per invoice — it's the "I don't believe
+        #that verdict" button, not the default.
+        job_id = start_real_job(company_id, project_id, period_id, tokens,
+                                force=bool(payload.get("force")))
         return jsonify({"job_id": job_id}), 202
 
     except PermissionError as e:
@@ -131,6 +142,91 @@ def invoice_pdf(job_id, requisition_id):
         return jsonify({"error": str(e)}), 500
 
 
+@sub_chaser_bp.post("/sub-chaser/attachments/probe")
+@cross_origin(origin=os.getenv("FRONTEND_URL"), supports_credentials=True)
+def attachments_probe():
+
+    #READ-ONLY. For a period's invoices: current attachment count and whether
+    #this user is allowed to attach to each one. Answers "would the upload
+    #button even work?" without writing anything.
+
+    try:
+        payload = request.get_json(silent=True) or {}
+        company_id = payload.get("company_id")
+        project_id = payload.get("project_id")
+        period_id = payload.get("period_id")
+
+        if not company_id or not project_id or not period_id:
+            return jsonify({"error": "Missing company_id, project_id or period_id"}), 400
+
+        requisitions = getRequisitionsForPeriod(company_id, project_id, period_id) or []
+        contracts = getWorkOrderContractsLite(company_id, project_id)
+
+        rows = []
+        for requisition in requisitions:
+            detail = getRequisition(company_id, project_id, requisition.get("id"))
+            allowed, tooltip = canAttach(detail)
+            clean = cleanRequisition(requisition, contracts)
+            rows.append({
+                "requisition_id": clean.get("requisition_id"),
+                "sc_number": clean.get("sc_number"),
+                "vendor_name": clean.get("vendor_name"),
+                "status": clean.get("status"),
+                "attachment_count": len(listAttachments(detail)),
+                "can_attach": allowed,
+                "reason": tooltip,
+            })
+
+        return jsonify({
+            "invoice_count": len(rows),
+            "attachable": sum(1 for r in rows if r["can_attach"] is True),
+            "blocked": sum(1 for r in rows if r["can_attach"] is False),
+            "unknown": sum(1 for r in rows if r["can_attach"] is None),
+            "invoices": rows,
+        }), 200
+
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@sub_chaser_bp.post("/sub-chaser/attachments/behavior-test")
+@cross_origin(origin=os.getenv("FRONTEND_URL"), supports_credentials=True)
+def attachments_behavior_test():
+
+    #⚠️ THIS WRITES TO PROCORE. Uploads one tiny test PDF to the given invoice
+    #to settle whether attachments APPEND or REPLACE — the docs don't say, and
+    #if it replaces, an upload feature would destroy subs' submitted paperwork.
+    #
+    #Use a THROWAWAY/DRAFT invoice. Requires an explicit confirm flag so it
+    #can't be triggered by accident.
+
+    try:
+        payload = request.get_json(silent=True) or {}
+        company_id = payload.get("company_id")
+        project_id = payload.get("project_id")
+        requisition_id = payload.get("requisition_id")
+
+        if not company_id or not project_id or not requisition_id:
+            return jsonify({"error": "Missing company_id, project_id or requisition_id"}), 400
+
+        if payload.get("i_understand_this_writes_to_procore") is not True:
+            return jsonify({
+                "error": "Refused: this uploads a file to a real Procore invoice. "
+                         "Pass i_understand_this_writes_to_procore: true, and use a "
+                         "throwaway/draft invoice — if attachments REPLACE, this wipes "
+                         "that invoice's existing attachments."
+            }), 400
+
+        return jsonify(testAttachmentBehavior(company_id, project_id, requisition_id)), 200
+
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @sub_chaser_bp.post("/sub-chaser/recipients/diagnostics")
 @cross_origin(origin=os.getenv("FRONTEND_URL"), supports_credentials=True)
 def recipients_diagnostics():
@@ -191,6 +287,56 @@ def recipients_diagnostics():
 
     except PermissionError as e:
         return jsonify({"error": str(e)}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@sub_chaser_bp.post("/sub-chaser/cache/diagnostics")
+@cross_origin(origin=os.getenv("FRONTEND_URL"), supports_credentials=True)
+def cache_diagnostics():
+
+    #Look at — and if asked, wipe — the stored verdicts.
+    #
+    #This exists for testing. When a cached verdict looks wrong the alternative
+    #is stopping Flask and deleting the sqlite file by hand, which is a terrible
+    #thing to need in the middle of a run. Read-only unless {"clear": true}.
+    #
+    #  {}                                        -> global count
+    #  {"company_id":…, "project_id":…}          -> that project's count
+    #  {"company_id":…, "project_id":…,
+    #   "clear": true}                           -> wipe just that project
+    #  {"clear": true, "confirm_all": true}      -> wipe everything
+    #
+    #A bare {"clear": true} is REFUSED on purpose: wiping every project's
+    #verdicts is a real cost event, and it should take saying so.
+
+    try:
+        payload = request.get_json(silent=True) or {}
+        company_id = payload.get("company_id")
+        project_id = payload.get("project_id")
+        scoped = bool(company_id and project_id)
+
+        report = {
+            "scope": "project" if scoped else "all",
+            "prompt_version": PROMPT_VERSION,
+            **verdict_cache.stats(company_id, project_id),
+        }
+
+        if payload.get("clear"):
+            if not scoped and not payload.get("confirm_all"):
+                return jsonify({
+                    "error": "Refusing to clear every project's verdicts. "
+                             "Send company_id + project_id to clear one project, "
+                             "or confirm_all: true to really wipe all of them.",
+                    **report,
+                }), 400
+
+            report["cleared"] = verdict_cache.clear(company_id, project_id)
+            report["cached_verdicts"] = verdict_cache.stats(
+                company_id, project_id).get("cached_verdicts")
+
+        return jsonify(report), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -269,6 +415,108 @@ def phase0_linkage():
 
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+#snapshots for the freshness probe below. Plain JSON in the OS temp dir — this
+#is throwaway diagnostic metadata (no PDFs, no verdicts), and putting it on disk
+#rather than in memory means a Flask restart between the two probe runs doesn't
+#lose the "before".
+_SNAPSHOT_DIR = os.path.join(tempfile.gettempdir(), "sub_chaser_snapshots")
+
+
+def _snapshotPath(project_id, period_id):
+    os.makedirs(_SNAPSHOT_DIR, exist_ok=True)
+    return os.path.join(_SNAPSHOT_DIR, f"{project_id}_{period_id}.json")
+
+
+def _loadSnapshot(project_id, period_id):
+    try:
+        with open(_snapshotPath(project_id, period_id), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _saveSnapshot(project_id, period_id, rows):
+    with open(_snapshotPath(project_id, period_id), "w", encoding="utf-8") as f:
+        json.dump(rows, f)
+
+
+@sub_chaser_bp.post("/sub-chaser/phase0/timestamps")
+@cross_origin(origin=os.getenv("FRONTEND_URL"), supports_credentials=True)
+def phase0_timestamps():
+
+    #FRESHNESS PROBE — answers the question the verdict cache depends on:
+    #when a sub adds an attachment to an invoice, does ANY timestamp move?
+    #
+    #How to run the test:
+    #   1. POST here with {company_id, project_id, period_id}  -> "before"
+    #   2. in Procore, add an attachment to one of the listed invoices
+    #   3. POST here again with the SAME ids                   -> "after" + diff
+    #
+    #Then read `diff.invoices_changed`: `requisition_stamps_changed` says which
+    #field (if any) Procore bumped on the requisition itself, and
+    #`fingerprint_moved` says whether our cache-invalidation signal fired. If a
+    #stamp moved that STAMP_KEYS doesn't list, add it there.
+    #
+    #`stamps_seen` lists every date-shaped field found anywhere, so we pick the
+    #real field instead of guessing at its name.
+    #
+    #Costs nothing in AI spend — no PDFs are compiled and no vision call is made.
+
+    try:
+        payload = request.get_json(silent=True) or {}
+        company_id = payload.get("company_id")
+        project_id = payload.get("project_id")
+        period_id = payload.get("period_id")
+
+        if not company_id or not project_id or not period_id:
+            return jsonify({"error": "Missing company_id, project_id or period_id"}), 400
+
+        requisitions = getRequisitionsForPeriod(company_id, project_id, period_id)
+        if requisitions is None:
+            return jsonify({"error": "Failed to retrieve requisitions"}), 502
+
+        rows = snapshot(requisitions)
+
+        previous = _loadSnapshot(project_id, period_id)
+        #{"reset": true} throws away the stored "before" and starts a fresh run
+        if payload.get("reset"):
+            previous = None
+
+        diff = diffSnapshots(previous, rows) if previous else None
+        _saveSnapshot(project_id, period_id, rows)
+
+        #every date-ish key seen on a requisition / on an attachment, so we can
+        #compare what EXISTS against what the fingerprint currently trusts
+        requisition_keys = sorted({k for r in rows.values()
+                                   for k in r["all_requisition_stamps"]})
+        attachment_keys = sorted({k for r in rows.values()
+                                  for a in r["attachments"] for k in a["stamps"]})
+
+        return jsonify({
+            "period_id": period_id,
+            "invoice_count": len(rows),
+            "run": "first (nothing to compare against yet — go change something "
+                   "in Procore and POST again)" if previous is None else "comparison",
+            "diff": diff,
+            "stamps_seen": {
+                "on_requisition": requisition_keys,
+                "on_attachment": attachment_keys,
+                "used_by_fingerprint": list(STAMP_KEYS),
+                #a key here that the fingerprint ignores is a candidate to add
+                "seen_but_unused": sorted(
+                    (set(requisition_keys) | set(attachment_keys)) - set(STAMP_KEYS)
+                ),
+            },
+            "invoices": rows,
+            "snapshot_file": _snapshotPath(project_id, period_id),
+        }), 200
+
     except PermissionError as e:
         return jsonify({"error": str(e)}), 401
     except Exception as e:

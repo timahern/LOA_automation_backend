@@ -30,7 +30,9 @@ from sub_chaser.procore_fetch import (
     cleanRequisition,
 )
 from sub_chaser.pdf_compile import compileInvoicePdf
-from sub_chaser.vision import analyze
+from sub_chaser.vision import analyze, MODEL
+from sub_chaser.freshness import fingerprint
+from sub_chaser import verdict_cache
 from sub_chaser.recipients import (
     getProjectDirectory, buildDirectoryIndex, resolveRecipients,
 )
@@ -52,11 +54,13 @@ _JOB_PDFS = {}
 
 # ── real job ─────────────────────────────────────────────────────────────────
 
-def start_real_job(company_id, project_id, period_id, tokens):
+def start_real_job(company_id, project_id, period_id, tokens, force=False):
 
     #kick off the fetch+analyze in the background and return immediately.
     #`tokens` is a WorkerTokens holding the signed-in user's Procore tokens
     #(captured by the route — flask's session isn't reachable from a thread).
+    #`force` re-reads every invoice even where a cached verdict exists — the
+    #escape hatch for "I don't believe that verdict, look again".
 
     job_id = uuid.uuid4().hex
 
@@ -71,19 +75,20 @@ def start_real_job(company_id, project_id, period_id, tokens):
             "company_id": company_id,
             "project_id": project_id,
             "period_id": period_id,
+            "force": force,
         }
         _JOB_PDFS[job_id] = {}
 
     threading.Thread(
         target=_runJob,
-        args=(job_id, company_id, project_id, period_id, tokens),
+        args=(job_id, company_id, project_id, period_id, tokens, force),
         daemon=True,
     ).start()
 
     return job_id
 
 
-def _runJob(job_id, company_id, project_id, period_id, tokens):
+def _runJob(job_id, company_id, project_id, period_id, tokens, force=False):
     try:
         #1. the period's invoices + the commitment list to resolve SC numbers
         requisitions = getRequisitionsForPeriod(company_id, project_id, period_id, tokens=tokens)
@@ -128,7 +133,8 @@ def _runJob(job_id, company_id, project_id, period_id, tokens):
         #3. compile + analyze every invoice concurrently
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             for requisition, row in zip(requisitions, rows):
-                pool.submit(_analyzeOne, job_id, company_id, project_id, requisition, row, tokens)
+                pool.submit(_analyzeOne, job_id, company_id, project_id,
+                            requisition, row, tokens, force)
 
         _finishJob(job_id)
 
@@ -139,7 +145,7 @@ def _runJob(job_id, company_id, project_id, period_id, tokens):
         _failJob(job_id, str(e))
 
 
-def _analyzeOne(job_id, company_id, project_id, requisition, row, tokens):
+def _analyzeOne(job_id, company_id, project_id, requisition, row, tokens, force=False):
 
     #one invoice: mark it reading, pull the merged PDF, run vision, record the
     #verdict. never raises — a failure lands as an "uncertain" row so one bad
@@ -160,6 +166,41 @@ def _analyzeOne(job_id, company_id, project_id, requisition, row, tokens):
             })
             return
 
+        #have we already judged this exact invoice state? the fingerprint covers
+        #the attachment id list, so a sub sending their paperwork in since the
+        #last run invalidates it — see freshness.py. A hit skips the Procore PDF
+        #compile AND the vision call; the PDF is recompiled on demand later only
+        #if this sub actually needs a chase email (get_invoice_pdf).
+        state_hash = fingerprint(requisition)
+
+        #`force` skips the LOOKUP only — the fresh verdict is still stored below,
+        #so a forced run repairs the cache rather than bypassing it forever.
+        cached = None if force else verdict_cache.getVerdict(
+            company_id, project_id, requisition_id, state_hash)
+
+        if cached:
+            #the only visible sign the cache fired — without it a working cache
+            #and a fast network look identical from the outside
+            print(f"[job {job_id}] invoice {requisition_id} cache HIT "
+                  f"(aia={cached['aia']} lien={cached['lien']}, "
+                  f"judged {cached['analyzed_at']})")
+            _setRow(job_id, requisition_id, {
+                "state": "done",
+                "has_pdf": True,
+                "aia": cached["aia"],
+                "lien": cached["lien"],
+                "confidence": cached["confidence"],
+                "notes": cached["notes"],
+                "from_cache": True,
+            })
+            return
+
+        #plain ASCII on purpose: this prints from a worker thread into whatever
+        #console the Flask service happens to have, and a fancy dash there is a
+        #UnicodeEncodeError waiting to become a bogus "uncertain" row
+        print(f"[job {job_id}] invoice {requisition_id} cache "
+              f"{'FORCED' if force else 'MISS'} - compiling + analyzing")
+
         _setRow(job_id, requisition_id, {"state": "reading"})
 
         pdf_bytes = compileInvoicePdf(company_id, project_id, requisition, tokens=tokens)
@@ -172,7 +213,14 @@ def _analyzeOne(job_id, company_id, project_id, requisition, row, tokens):
 
         verdict = analyze(pdf_bytes)
 
-        _setRow(job_id, requisition_id, {"state": "done", "has_pdf": True, **verdict})
+        #keep it for next time, tied to the invoice state we just judged.
+        #"uncertain" verdicts are NOT stored (see isCacheable) — those are
+        #usually transient failures and must be retried, not frozen in.
+        verdict_cache.putVerdict(company_id, project_id, requisition_id,
+                                 state_hash, verdict, model=MODEL)
+
+        _setRow(job_id, requisition_id, {"state": "done", "has_pdf": True,
+                                         "from_cache": False, **verdict})
 
     except Exception as e:
         print(f"[job {job_id}] invoice {requisition_id} failed: {e}")
