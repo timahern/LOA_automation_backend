@@ -16,6 +16,7 @@ from routes.procore import procore_bp
 from routes.billing import billing_bp
 from routes.rag import rag_bp
 from routes.sub_chaser import sub_chaser_bp
+from routes.invoice_intake import invoice_intake_bp
 
 
 PROCORE_CLIENT_ID = os.getenv("PROCORE_CLIENT_ID")
@@ -58,6 +59,7 @@ app.register_blueprint(procore_bp)
 app.register_blueprint(billing_bp)
 app.register_blueprint(rag_bp)
 app.register_blueprint(sub_chaser_bp)
+app.register_blueprint(invoice_intake_bp)
 
 
 @app.errorhandler(RateLimitExceeded)
