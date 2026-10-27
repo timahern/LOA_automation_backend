@@ -1,29 +1,86 @@
-#Resolving a subcontractor company to the people we email.
+#Resolving a subcontractor to the people we email.
 #
-#Each invoice already carries its vendor (company) from the Procore API. This
-#turns that company into contacts + email addresses:
+#In order of preference:
 #
-#   1. PROJECT DIRECTORY (primary) — /rest/v1.0/projects/{id}/users. Every person
-#      on the job, each linked to the company they work for. One call covers every
-#      sub on the project, so we fetch it ONCE per analysis run and index it by
-#      vendor id.
-#   2. VENDOR RECORD (fallback) — the company's own email_address, used when the
-#      directory has nobody for that company.
-#
-#v1 puts ALL of a company's contacts in the To line (per the build brief). The
-#title filter for billing/AP-only contacts is structured below but deliberately
-#NOT applied yet — flip APPLY_BILLING_FILTER when you want it.
+#   1. INVOICE CONTACTS (primary) — the "Invoice Contacts" field the APM fills in
+#      on the subcontract in Procore. These are exactly the people the APM chose
+#      to handle invoicing, so they're the right To line. Only the single-
+#      contract endpoint returns them (GET /rest/v1.0/work_order_contracts/{id},
+#      the list endpoint doesn't), so it's one call per subcontract that billed
+#      this period — jobs.py fetches each once, not once per invoice.
+#      Verified Oct 27, 2026: 23 of 23 readable subcontracts on Tatte 3254966 had it filled in.
+#   2. PROJECT DIRECTORY (fallback) — everyone at that company in
+#      /rest/v1.0/projects/{id}/users. Fetched ONCE per run, indexed by vendor id.
+#   3. VENDOR RECORD (last resort) — the company's own email_address.
 
 import re
 
 from sub_chaser.procore_fetch import procoreGet
 
-#for a later "only email the billing people" mode. structured, not switched on.
-BILLING_TITLE_PATTERN = re.compile(r"billing|account|office|insurance", re.I)
-APPLY_BILLING_FILTER = False
+EMAIL_PATTERN = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
 
-EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+#APMs mark retired contacts by renaming them, e.g. "Milly Santiago - DO NOT USE"
+DO_NOT_USE_PATTERN = re.compile(r"do\s*not\s*use", re.I)
 
+
+def _cleanEmail(value):
+    #"<joshk@kazimarindustrial.com" (seen in real data) -> "joshk@kazimarindustrial.com"
+    return (value or "").strip().strip("<>").strip()
+
+
+def _contact(name, email, title, source):
+
+    #-> a contact dict, or None if it's unusable (bad email / marked DO NOT USE)
+
+    email = _cleanEmail(email)
+    if not EMAIL_PATTERN.match(email):
+        return None
+    if DO_NOT_USE_PATTERN.search(name or ""):
+        return None
+    return {
+        "name": (name or "").strip() or email,
+        "email": email,
+        "title": (title or "").strip(),
+        "source": source,
+    }
+
+
+#── 1. invoice contacts on the subcontract ─────────────────────────────────────
+
+def getInvoiceContacts(company_id, project_id, commitment_id, tokens=None):
+
+    #the subcontract's Invoice Contacts. returns [] when the field is empty and
+    #None when the fetch itself failed — the caller falls back either way, but
+    #the log says which.
+
+    if not commitment_id:
+        return None
+
+    response = procoreGet(
+        f"https://api.procore.com/rest/v1.0/work_order_contracts/{commitment_id}",
+        company_id,
+        params={"project_id": project_id},
+        tokens=tokens,
+    )
+    if response.status_code != 200:
+        print(f"[recipients] invoice contacts fetch failed for commitment {commitment_id} "
+              f"({response.status_code})")
+        return None
+
+    contacts = []
+    for person in (response.json() or {}).get("invoice_contacts") or []:
+        contact = _contact(
+            person.get("name"),
+            person.get("email_address") or person.get("email"),
+            person.get("job_title"),
+            "invoice contacts",
+        )
+        if contact:
+            contacts.append(contact)
+    return contacts
+
+
+#── 2. project directory ───────────────────────────────────────────────────────
 
 def getProjectDirectory(company_id, project_id, tokens=None):
 
@@ -58,27 +115,6 @@ def _vendorIdOf(user):
     return None
 
 
-def _contactFrom(user):
-
-    #one directory person -> a contact, or None if there's no usable email
-
-    email = (user.get("email_address") or user.get("email") or "").strip()
-    if not EMAIL_PATTERN.match(email):
-        return None
-
-    name = " ".join(part for part in [
-        (user.get("first_name") or "").strip(),
-        (user.get("last_name") or "").strip(),
-    ] if part).strip()
-
-    return {
-        "name": name or email,
-        "email": email,
-        "title": (user.get("job_title") or "").strip(),
-        "source": "directory",
-    }
-
-
 def buildDirectoryIndex(users):
 
     #vendor_id -> [contact, ...]. inactive people are skipped; a company can
@@ -93,7 +129,12 @@ def buildDirectoryIndex(users):
         if not vendor_id:
             continue
 
-        contact = _contactFrom(user)
+        name = " ".join(part for part in [
+            (user.get("first_name") or "").strip(),
+            (user.get("last_name") or "").strip(),
+        ] if part)
+        contact = _contact(name, user.get("email_address") or user.get("email"),
+                           user.get("job_title"), "directory")
         if not contact:
             continue
 
@@ -102,10 +143,12 @@ def buildDirectoryIndex(users):
     return index
 
 
+#── 3. vendor record ───────────────────────────────────────────────────────────
+
 def getVendorFallbackContact(company_id, project_id, vendor_id, tokens=None):
 
-    #the company's own email on the vendor record — used when the project
-    #directory has nobody for them
+    #the company's own email on the vendor record — used when nothing else
+    #turned anyone up
 
     if not vendor_id:
         return None
@@ -119,29 +162,23 @@ def getVendorFallbackContact(company_id, project_id, vendor_id, tokens=None):
         return None
 
     vendor = response.json() or {}
-    email = (vendor.get("email_address") or vendor.get("email") or "").strip()
-    if not EMAIL_PATTERN.match(email):
-        return None
-
-    return {
-        "name": vendor.get("name") or "",
-        "email": email,
-        "title": "",
-        "source": "vendor record",
-    }
+    return _contact(vendor.get("name"), vendor.get("email_address") or vendor.get("email"),
+                    "", "vendor record")
 
 
-def resolveRecipients(directory_index, vendor_id, company_id=None, project_id=None, tokens=None):
+#── putting it together ────────────────────────────────────────────────────────
 
-    #every contact we'd email for this company. directory first; if that's empty
-    #fall back to the vendor record's own address.
+def resolveRecipients(directory_index, vendor_id, invoice_contacts=None,
+                      company_id=None, project_id=None, tokens=None):
 
-    contacts = list(directory_index.get(str(vendor_id)) or []) if vendor_id else []
+    #every contact we'd email for this invoice: the subcontract's invoice
+    #contacts if it has any, else that company's people in the project
+    #directory, else the vendor record's own address.
 
-    if APPLY_BILLING_FILTER:
-        billing = [c for c in contacts if BILLING_TITLE_PATTERN.search(c.get("title") or "")]
-        if billing:  #never filter down to nobody
-            contacts = billing
+    contacts = list(invoice_contacts or [])
+
+    if not contacts and vendor_id:
+        contacts = list(directory_index.get(str(vendor_id)) or [])
 
     if not contacts and company_id and project_id:
         fallback = getVendorFallbackContact(company_id, project_id, vendor_id, tokens=tokens)

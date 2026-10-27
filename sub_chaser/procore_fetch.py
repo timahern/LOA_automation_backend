@@ -8,6 +8,7 @@
 #Billing periods and commitments are NOT re-implemented — routes reuse
 #getBillingPeriods() and getWorkOrderContracts() from subcontractor_info_retrieval.
 
+import time
 import requests
 from auth.tokenStore import load_tokens
 from auth.getTokens import refresh_and_store_tokens
@@ -54,7 +55,30 @@ def procoreGet(url, company_id, params=None, tokens=None):
         response = send(refreshAccessToken(tokens))
         print("Status:", response.status_code)
 
+    #429 = procore's short burst limit. wait it out a few times rather than
+    #handing back a failure (seen live when fetching ~25 contracts in a row).
+    #waits are capped at 30s — if the reset is further out than that it's the
+    #hourly limit, and sleeping won't save this request.
+    retries = 0
+    while response.status_code == 429 and retries < 3:
+        wait = _rateLimitWait(response, retries)
+        print(f"[procore] 429 rate limited, waiting {wait}s (attempt {retries + 1}/3)")
+        time.sleep(wait)
+        retries += 1
+        response = send(getAccessToken(tokens))
+        print("Status:", response.status_code)
+
     return response
+
+
+def _rateLimitWait(response, retries):
+    retry_after = response.headers.get("Retry-After")
+    if retry_after and retry_after.isdigit():
+        return min(int(retry_after) + 1, 30)
+    reset = int(response.headers.get("X-Rate-Limit-Reset", 0) or 0)
+    if reset:
+        return min(max(reset - int(time.time()), 0) + 1, 30)
+    return 5 * (2 ** retries)
 
 
 def getRequisitionsForPeriod(company_id, project_id, period_id, tokens=None):

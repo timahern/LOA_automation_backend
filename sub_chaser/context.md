@@ -86,17 +86,27 @@ session); the poll route writes rotated tokens back into the session.
   `SUB_CHASER_VISION_EFFORT` (default `medium`).
   Invoices with zero attachments skip the compile and the AI call entirely —
   nothing submitted is a verdict on its own.
-- **Phase 3 (BUILT, needs desk verification):** contact resolution in
-  `recipients.py`. Project directory (`GET /rest/v1.0/projects/{id}/users`) is
-  fetched ONCE per run and indexed by company id, so per-invoice lookup is a dict
-  hit, not a request. Falls back to the vendor record's own `email_address` only
-  for companies the directory missed. Contacts are
-  `{name, email, title, source}`; inactive users, missing/invalid emails, and
-  duplicate addresses (case-insensitive) are dropped. Company linkage is read
-  from `vendor{}` / `company{}` / `vendor_id` / `company_id` — shape varies.
-  All contacts go in `To` (v1 per brief); the billing/AP title filter exists as
-  `BILLING_TITLE_PATTERN` + `APPLY_BILLING_FILTER = False` — flip to enable.
-  Verify with `POST /sub-chaser/recipients/diagnostics`.
+- **Phase 3 — contact resolution (`recipients.py`), reworked Oct 27, 2026:**
+  The To line is the subcontract's **Invoice Contacts** — the field the APM fills
+  in on the commitment in Procore (the people with access to its invoicing/SSOV).
+  Only `GET /rest/v1.0/work_order_contracts/{id}` returns it (`invoice_contacts[]`
+  with name + `email_address`); the list endpoint does NOT. `jobs.py` fetches it
+  once per subcontract that billed in the period, not once per invoice.
+  Verified on Tatte 3254966: 23 of 23 readable subcontracts had it filled in.
+  (v2.0 `commitment_contracts/{id}` only has `accessor_ids` — that's the
+  "Access for Non-Admin Users" field, not what we want.)
+  Fallbacks, only when a subcontract has no invoice contacts or the fetch
+  fails: that company's people in the project directory (fetched ONCE per run,
+  indexed by vendor id), then the vendor record's own `email_address`.
+  Cleanup on every source: stray `<>` stripped from emails (real data had
+  `<joshk@...`), anyone whose name contains "DO NOT USE" dropped (APMs retire
+  contacts that way), invalid emails dropped, duplicates (case-insensitive)
+  removed. Each contact's `source` is `invoice contacts` / `directory` /
+  `vendor record`; the frontend only labels `vendor record`. The job log
+  prints the count + source per invoice. The old billing-title filter was
+  removed (owner didn't want it).
+  `procoreGet` now waits and retries on 429 (up to 3 times, max 30s each). A
+  burst of ~25 contract fetches hit the limit live.
 - **Phase 4 — verdict cache (DONE, verified live Aug 28, 2026):** `freshness.py`
   fingerprints an invoice's state, `verdict_cache.py` stores confident verdicts
   in a sqlite file keyed by that fingerprint + `PROMPT_VERSION`, and
@@ -241,4 +251,4 @@ alternative — a `/sub-chaser/jobs/*` behavior on distribution `EFM82AQNI5RIQ` 
 
 ## Out of scope (per brief)
 SharePoint sync, storing PDFs, automated sending,
-billing/AP-contact title filter (structure only), production hardening.
+production hardening.

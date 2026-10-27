@@ -34,7 +34,7 @@ from sub_chaser.vision import analyze, MODEL
 from sub_chaser.freshness import fingerprint
 from sub_chaser import verdict_cache
 from sub_chaser.recipients import (
-    getProjectDirectory, buildDirectoryIndex, resolveRecipients,
+    getProjectDirectory, buildDirectoryIndex, resolveRecipients, getInvoiceContacts,
 )
 
 #procore allows 3,600 req/hr per token and each compile polls every 3s, so keep
@@ -109,20 +109,34 @@ def _runJob(job_id, company_id, project_id, period_id, tokens, force=False):
             print(f"[job {job_id}] directory lookup failed: {e}")
 
         #2. seed a row per invoice so the table renders immediately
-        rows = []
-        for requisition in requisitions:
-            row = cleanRequisition(requisition, contracts)
+        rows = [cleanRequisition(requisition, contracts) for requisition in requisitions]
+
+        #each subcontract's Invoice Contacts, fetched ONCE per subcontract — a
+        #sub with two invoices this period still costs one call
+        invoice_contacts = {}
+        for commitment_id in {str(row.get("commitment_id")) for row in rows if row.get("commitment_id")}:
+            try:
+                invoice_contacts[commitment_id] = getInvoiceContacts(
+                    company_id, project_id, commitment_id, tokens=tokens
+                )
+            except Exception as e:
+                print(f"[job {job_id}] invoice contacts lookup failed for {commitment_id}: {e}")
+
+        for row in rows:
             row["state"] = "queued"
-            #vendor-record fallback only fires for companies the directory
-            #didn't cover, so it costs a call per gap rather than per invoice
+            #invoice contacts first; the directory / vendor-record fallbacks
+            #only fire for subcontracts with none
             row["recipients"] = resolveRecipients(
                 directory_index,
                 row.get("vendor_id"),
+                invoice_contacts=invoice_contacts.get(str(row.get("commitment_id"))),
                 company_id=company_id,
                 project_id=project_id,
                 tokens=tokens,
             )
-            rows.append(row)
+            sources = sorted({c["source"] for c in row["recipients"]}) or ["none found"]
+            print(f"[job {job_id}] {row.get('sc_number')} {row.get('vendor_name')}: "
+                  f"{len(row['recipients'])} recipient(s) from {', '.join(sources)}")
 
         _updateJob(job_id, results=rows)
 
